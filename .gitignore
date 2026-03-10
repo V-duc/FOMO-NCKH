@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+build/
+MANIFEST
+
+# Jupyter Notebook
+notebook/
+.ipynb_checkpoints
+*.ipynb
+
+# IDEs
+.vscode/
+*.swp
+*.swo
+*~
+
+# Model files
+*.pkl
+
+# Logs
+*.log
