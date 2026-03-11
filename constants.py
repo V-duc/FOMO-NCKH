@@ -22,6 +22,13 @@ MODEL_DIR = "data/models"
 TRANSACTIONS_FILE = f"{INPUT_DIR}/transactions.csv"
 CUSTOMERS_FILE = f"{INPUT_DIR}/customer_information.csv"
 CLOSE_PRICES_FILE = f"{INPUT_DIR}/close_prices.csv"
+ASSETS_FILE        = f"{INPUT_DIR}/asset_information.csv"   # filter Stock
+
+# ── Cleaned/enriched intermediate files ───────────────────────────────────
+# Tách raw → enriched để không phải load lại raw CSV mỗi khi thay đổi feature
+ENRICHED_TRADES_TRAIN_FILE = f"{OUTPUT_DIR}/enriched_trades_train.csv"
+ENRICHED_TRADES_VAL_FILE   = f"{OUTPUT_DIR}/enriched_trades_val.csv"
+MARKET_DATA_FILE           = f"{OUTPUT_DIR}/market_data.csv"
 
 FOMO_FEATURE_FILE = f"{OUTPUT_DIR}/fomo_feature_data.csv"
 FOMO_FEATURE_LABEL_FILE = f"{OUTPUT_DIR}/fomo_feature_label_data.csv"
