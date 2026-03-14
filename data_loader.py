@@ -69,7 +69,7 @@ def _load_transactions(file: str) -> pd.DataFrame:
     :param file: Path to transactions CSV
     :return: Preprocessed trades DataFrame
     """
-    transactions = pd.read_excel(file)
+    transactions =  pd.read_csv(file, parse_dates=["timestamp"])
     transactions["timestamp"] = pd.to_datetime(transactions["timestamp"])
 
     # [NEW] Filter time period — bỏ COVID period và data artifact đầu dataset
@@ -105,6 +105,7 @@ def _load_transactions(file: str) -> pd.DataFrame:
     trades = transactions[[
         "customerID",
         "ISIN",
+        "transactionID",
         "timestamp",
         "side",
         "price",
@@ -114,6 +115,7 @@ def _load_transactions(file: str) -> pd.DataFrame:
     ]].rename(columns={
         "customerID": "investor_id",
         "ISIN":       "asset_id",
+        'transactionID': "tx_id",
         "units":      "quantity",
     })
     return trades
@@ -134,7 +136,7 @@ def _load_customers(file: str) -> pd.DataFrame:
     :param file: Path to customer_information CSV
     :return: DataFrame với customerID + encoded features, chỉ giữ valid customers
     """
-    customers = pd.read_excel(file)
+    customers =  pd.read_csv(file, parse_dates=["timestamp"])
     customers["timestamp"] = pd.to_datetime(customers["timestamp"])
 
     # [NEW] Dedup — lấy record mới nhất per customer
