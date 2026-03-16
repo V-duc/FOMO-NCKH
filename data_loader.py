@@ -105,7 +105,6 @@ def _load_transactions(file: str) -> pd.DataFrame:
     trades = transactions[[
         "customerID",
         "ISIN",
-        "transactionID",
         "timestamp",
         "side",
         "price",
@@ -115,9 +114,12 @@ def _load_transactions(file: str) -> pd.DataFrame:
     ]].rename(columns={
         "customerID": "investor_id",
         "ISIN":       "asset_id",
-        'transactionID': "tx_id",
         "units":      "quantity",
     })
+    # Tránh many-to-many join khi một bên là int64 và bên kia là object
+
+    trades["investor_id"] = trades["investor_id"].astype(str)
+    
     return trades
 
 
@@ -138,17 +140,24 @@ def _load_customers(file: str) -> pd.DataFrame:
     """
     customers =  pd.read_csv(file, parse_dates=["timestamp"])
     customers["timestamp"] = pd.to_datetime(customers["timestamp"])
-
+    # [FIX] Ép kiểu customerID về str để tránh mixed int/str type
+    # khiến groupby treat "12345" và 12345 là 2 keys khác nhau → duplicate sau dedup
+    customers["customerID"] = customers["customerID"].astype(str)
     # [NEW] Dedup — lấy record mới nhất per customer
     # EDA: 0 customer thay đổi riskLevel/capacity → lấy latest là safe
+    # Dùng sort + drop_duplicates thay vì groupby.last() để tránh NaN-skipping behavior
+    # (groupby.last() bỏ qua NaN per-column independently → có thể mix data từ nhiều rows)
     customers = (
         customers
         .sort_values("timestamp")
-        .groupby("customerID")
-        .last()
-        .reset_index()
+        .drop_duplicates(subset=["customerID"], keep="last")
+        .reset_index(drop=True)
     )
-
+ 
+    # Sanity check — phải unique sau dedup
+    assert customers["customerID"].nunique() == len(customers), \
+        f"[BUG] customers vẫn có duplicate customerID sau dedup! " \
+        f"{len(customers)} rows vs {customers['customerID'].nunique()} unique"
     # [NEW] Encode riskLevel → ordinal float
     customers["risk_level"] = customers["riskLevel"].map(_RISK_LEVEL_MAP)
 
@@ -219,12 +228,17 @@ def _attach_customer_features(trades: pd.DataFrame, customers: pd.DataFrame) -> 
         "risk_level",
         "investment_capacity_ordinal",
         "investment_capacity_value",
-    ]]
+    ]].drop_duplicates(subset=["customerID"])
 
     def _join_and_compute(trades_subset: pd.DataFrame, cust_subset: pd.DataFrame) -> pd.DataFrame:
         # Filter trades theo customer set
         result = trades_subset[trades_subset["investor_id"].isin(cust_subset["customerID"])]
-
+        n_before_join = len(result)
+ 
+        # Sanity check: customer_features phải unique trước khi join
+        assert customer_features["customerID"].nunique() == len(customer_features), \
+            f"[BUG] customer_features có duplicate customerID → join sẽ inflate trades!"
+ 
         # Join customer features
         result = result.merge(
             customer_features,
@@ -232,27 +246,32 @@ def _attach_customer_features(trades: pd.DataFrame, customers: pd.DataFrame) -> 
             right_on="customerID",
             how="left"
         ).drop(columns=["customerID"])
-
+ 
+        # [FIX] Catch inflate ngay sau join — nếu inflate → bug còn đó
+        assert len(result) == n_before_join, \
+            f"[BUG] Join inflated trades! {n_before_join} → {len(result)} rows. " \
+            f"customer_features có duplicate customerID."
+ 
         # [NEW] Tính position_size_ratio = totalValue / investment_capacity_value
         # Đo mức độ "bet lớn" của investor — FOMO investor thường bet lớn hơn capacity
         # NaN nếu investment_capacity_value = None (Not_Available)
         result["position_size_ratio"] = (
             result["totalValue"] / result["investment_capacity_value"]
         )
-
+ 
         # Bỏ investment_capacity_value sau khi tính ratio — không cần đưa vào model
         result = result.drop(columns=["investment_capacity_value"])
-
+ 
         return result
-
+ 
     train_trades = _join_and_compute(trades, train_customers)
     val_trades   = _join_and_compute(trades, val_customers)
-
+ 
     print(f"[customer split] train: {len(train_trades):,} rows "
           f"({train_trades['investor_id'].nunique():,} investors)")
     print(f"[customer split] validation (Professional): {len(val_trades):,} rows "
           f"({val_trades['investor_id'].nunique():,} investors)")
-
+ 
     return train_trades, val_trades
 
 

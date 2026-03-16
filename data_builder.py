@@ -222,6 +222,7 @@ def enrich_trades_with_market(trades: pd.DataFrame, market: pd.DataFrame) -> pd.
     :param market: Enriched market DataFrame từ build_market
     :return: Trades với thêm market context columns
     """
+    market = market.drop_duplicates(subset=['asset_id', 'timestamp'])
     enriched = trades.merge(
         market,
         on=["asset_id", "timestamp"],

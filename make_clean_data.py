@@ -102,6 +102,16 @@ def build_enriched_trades():
     # Sanity check: xem sample output
     print(f"\nSample enriched train (3 rows):")
     print(enriched_train.head(3).to_string())
+    
+    # ── Tạo tx_id từ index ────────────────────────────────────────────────────
+    enriched_train = enriched_train.reset_index(drop=True)
+    enriched_train.insert(0, "tx_id", enriched_train.index)
+
+    enriched_val = enriched_val.reset_index(drop=True)
+    enriched_val.insert(0, "tx_id", enriched_val.index)
+
+    print(f"tx_id added: train {enriched_train['tx_id'].max()+1} rows, "
+        f"val {enriched_val['tx_id'].max()+1} rows")
 
     # ── Step 4: Save ──────────────────────────────────────────────────────
     print("\n" + "=" * 60)

@@ -237,3 +237,5 @@ if os.path.exists(VAL_INPUT):
     })
     out_val.to_csv(VAL_OUTPUT, index=False)
     print(f"\n  ✓ Saved: {VAL_OUTPUT}")
+    
+    print(label_model.get_weights())
