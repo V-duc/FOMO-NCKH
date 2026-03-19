@@ -46,7 +46,7 @@ ABSTAIN = -1
 # ── Thresholds ────────────────────────────────────────────────────────────
 RETURN_5D_THRESHOLD  = 0.0306   # Jenks natural break trên dense group
 RSI_FOMO_THRESHOLD   = 75.0    # Wilder overbought — lý thuyết, không Jenks
-RSI_NORMAL_THRESHOLD = 50.0    # RSI < 50 = oversold/neutral = rational buy
+RSI_NORMAL_THRESHOLD = 40.0    # RSI < 50 = oversold/neutral = rational buy
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -100,6 +100,8 @@ def LF_return_momentum(x):
         return ABSTAIN
     if x.return_5d > RETURN_5D_THRESHOLD:
         return FOMO
+    if x.return_5d < -0.0608:
+        return NORMAL
     return ABSTAIN
 
 
@@ -153,6 +155,8 @@ def LF_bollinger_breakout(x):
         return ABSTAIN
     if x.price_above_bollinger == 1.0:
         return FOMO
+    if x.price_below_bollinger == 1.0:
+        return NORMAL
     return ABSTAIN
 
 
@@ -181,6 +185,26 @@ def LF_value_spike(x):
         return FOMO
     return ABSTAIN
 
+#HERD BEHAVIOR
+@labeling_function()
+def LF_herding_crowd(x):
+    """
+    Bắt hành vi bầy đàn — mua khi số lệnh BUY trên asset vượt P90 lịch sử.
+
+    Lý thuyết: Hirshleifer & Teoh (2003) — herding behavior, investors
+    follow the crowd vào asset đang được chú ý bất thường.
+    Per-asset P90 (60 ngày) tránh bias giữa blue-chip và cổ phiếu nhỏ.
+
+    Vùng:
+        asset_buy_count_same_day > asset_buy_count_p95_60d  → FOMO
+        NaN (warmup < 10 ngày)                              → ABSTAIN
+        <= p90                                              → ABSTAIN
+    """
+    if pd.isna(x.asset_buy_count_p95_60d):
+        return ABSTAIN
+    if x.asset_buy_count_same_day > x.asset_buy_count_p95_60d:
+        return FOMO
+    return ABSTAIN
 
 # ── Export list — dùng trong run_snorkel.py ───────────────────────────────
 LFS = [
@@ -189,4 +213,5 @@ LFS = [
     LF_rsi_extreme,
     LF_bollinger_breakout,
     LF_value_spike,
+    LF_herding_crowd,
 ]

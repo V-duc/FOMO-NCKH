@@ -35,6 +35,10 @@ FOMO_FEATURE_LABEL_FILE = f"{OUTPUT_DIR}/fomo_feature_label_data.csv"
 FOMO_TRAIN_FILE = f"{OUTPUT_DIR}/fomo_train_data.csv"
 FOMO_TEST_FILE = f"{OUTPUT_DIR}/fomo_test_data.csv"
 
+SNORKEL_LABELS_FILE = f"{OUTPUT_DIR}/snorkel_labels.csv"
+TRADE_FEATURES_FILE = f"{OUTPUT_DIR}/trade_behavior_features.csv"
+XGBOOST_MODEL_FILE  = f"{MODEL_DIR}/fomo_xgboost.json"
+
 FEATURE_COLS = [
     "avg_return_before_buy",
     "buy_after_spike_ratio",

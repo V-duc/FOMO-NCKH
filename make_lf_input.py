@@ -76,10 +76,11 @@ mkt["std_20d"] = (
     .transform(lambda x: x.rolling(20, min_periods=10).std())
 )
 mkt["bollinger_upper"] = mkt["ma_20d"] + 2 * mkt["std_20d"]
+mkt["bollinger_lower"] = mkt["ma_20d"] - 2 * mkt["std_20d"]
 
 # Merge vào buys — unique per (asset_id, timestamp) nên không explode
 buys = buys.merge(
-    mkt[["asset_id", "timestamp", "bollinger_upper"]],
+    mkt[["asset_id", "timestamp", "bollinger_upper", "bollinger_lower"]],
     on=["asset_id", "timestamp"],
     how="left"
 )
@@ -89,20 +90,62 @@ buys["price_above_bollinger"] = np.where(
     (buys["price"] > buys["bollinger_upper"]).astype(float)
 )
 
+buys["price_below_bollinger"] = np.where(
+    buys["bollinger_lower"].isna(), np.nan,
+    (buys["price"] < buys["bollinger_lower"]).astype(float)
+)
+
 n_above = (buys["price_above_bollinger"] == 1).sum()
 n_valid = buys["price_above_bollinger"].notna().sum()
 print(f"  price_above_bollinger = 1: {n_above:,} ({n_above/n_valid*100:.1f}% of valid)")
 print(f"  NaN (warmup period):       {buys['price_above_bollinger'].isna().sum():,}")
+
+# ── Herding signal: n_buys per asset per day (rolling P90) ───────────────
+print("\n  Computing herding signal (asset buy count vs rolling P90)...")
+
+# Đếm số lệnh BUY per asset per day trong buys
+asset_day_counts = (
+    buys.groupby(["asset_id", "timestamp"])
+    .size()
+    .reset_index(name="asset_buy_count_same_day")
+)
+
+# Tính rolling P90 60 ngày trước cho từng asset
+# Merge vào market_data để có đủ ngày kể cả ngày không có giao dịch
+asset_day_counts = asset_day_counts.sort_values(["asset_id", "timestamp"])
+
+asset_day_counts["asset_buy_count_p95_60d"] = (
+    asset_day_counts.groupby("asset_id")["asset_buy_count_same_day"]
+    .transform(
+        lambda x: x.shift(1).rolling(60, min_periods=10).quantile(0.95)
+    )
+)
+
+# Merge vào buys
+buys = buys.merge(
+    asset_day_counts[["asset_id", "timestamp",
+                       "asset_buy_count_same_day",
+                       "asset_buy_count_p95_60d"]],
+    on=["asset_id", "timestamp"],
+    how="left"
+)
+
+n_valid = buys["asset_buy_count_p95_60d"].notna().sum()
+n_above = (buys["asset_buy_count_same_day"] > buys["asset_buy_count_p95_60d"]).sum()
+print(f"  asset_buy_count_same_day computed: {buys['asset_buy_count_same_day'].notna().sum():,}")
+print(f"  asset_buy_count_p95_60d NaN (warmup): {buys['asset_buy_count_p95_60d'].isna().sum():,}")
+print(f"  Lệnh vượt P90 (herding signal): {n_above:,} ({n_above/n_valid*100:.1f}% of valid)")
 
 # ── Output ────────────────────────────────────────────────────────────────
 output_cols = [
     "tx_id", "investor_id", "asset_id", "timestamp",
     # LF features mới
     "days_since_last_buy", "prev_asset_id", "p90_trade_value", 
-    "bollinger_upper", "price_above_bollinger",
+    "bollinger_upper", "price_above_bollinger", "bollinger_lower", "price_below_bollinger",
     # LF features từ enriched file
     "channel", "totalValue", "return_5d", "rsi_14",
     "volatility_5d", "market_price", "ma_20d", "price_above_ma20",
+    "asset_buy_count_same_day", "asset_buy_count_p95_60d",
 ]
 
 lf_input = buys[output_cols].copy()
@@ -119,34 +162,34 @@ for col in output_cols:
         
         
 
-# ── Validation set (Professional investors) ───────────────────────────────
-print("\nProcessing validation set (Professional investors)...")
-df_val = pd.read_csv(ENRICHED_TRADES_VAL_FILE, parse_dates=["timestamp"])
-buys_val = df_val[df_val["side"] == "BUY"].copy()
-buys_val = buys_val.sort_values(["investor_id", "timestamp"]).reset_index(drop=True)
-print(f"  BUY val: {len(buys_val):,} rows, {buys_val['investor_id'].nunique():,} investors")
+# # ── Validation set (Professional investors) ───────────────────────────────
+# print("\nProcessing validation set (Professional investors)...")
+# df_val = pd.read_csv(ENRICHED_TRADES_VAL_FILE, parse_dates=["timestamp"])
+# buys_val = df_val[df_val["side"] == "BUY"].copy()
+# buys_val = buys_val.sort_values(["investor_id", "timestamp"]).reset_index(drop=True)
+# print(f"  BUY val: {len(buys_val):,} rows, {buys_val['investor_id'].nunique():,} investors")
 
-# Tính các features giống hệt train
-buys_val["days_since_last_buy"] = (
-    buys_val.groupby("investor_id")["timestamp"].diff().dt.days
-)
-buys_val["prev_asset_id"] = buys_val.groupby("investor_id")["asset_id"].shift(1)
+# # Tính các features giống hệt train
+# buys_val["days_since_last_buy"] = (
+#     buys_val.groupby("investor_id")["timestamp"].diff().dt.days
+# )
+# buys_val["prev_asset_id"] = buys_val.groupby("investor_id")["asset_id"].shift(1)
 
-buy_counts_val = buys_val.groupby("investor_id").size()
-sparse_ids_val = buy_counts_val[buy_counts_val < SPARSE_THRESHOLD].index
-p90_val = buys_val.groupby("investor_id")["totalValue"].quantile(0.9).rename("p90_trade_value")
-p90_val[p90_val.index.isin(sparse_ids_val)] = np.nan
-buys_val = buys_val.join(p90_val, on="investor_id")
+# buy_counts_val = buys_val.groupby("investor_id").size()
+# sparse_ids_val = buy_counts_val[buy_counts_val < SPARSE_THRESHOLD].index
+# p90_val = buys_val.groupby("investor_id")["totalValue"].quantile(0.9).rename("p90_trade_value")
+# p90_val[p90_val.index.isin(sparse_ids_val)] = np.nan
+# buys_val = buys_val.join(p90_val, on="investor_id")
 
-buys_val = buys_val.merge(
-    mkt[["asset_id", "timestamp", "bollinger_upper"]],
-    on=["asset_id", "timestamp"], how="left"
-)
-buys_val["price_above_bollinger"] = np.where(
-    buys_val["bollinger_upper"].isna(), np.nan,
-    (buys_val["price"] > buys_val["bollinger_upper"]).astype(float)
-)
+# buys_val = buys_val.merge(
+#     mkt[["asset_id", "timestamp", "bollinger_upper"]],
+#     on=["asset_id", "timestamp"], how="left"
+# )
+# buys_val["price_above_bollinger"] = np.where(
+#     buys_val["bollinger_upper"].isna(), np.nan,
+#     (buys_val["price"] > buys_val["bollinger_upper"]).astype(float)
+# )
 
-lf_input_val = buys_val[["tx_id"] + [c for c in output_cols if c != "tx_id"]].copy()
-lf_input_val.to_csv(f"{OUTPUT_DIR}/lf_input_val.csv", index=False)
-print(f"✓ Saved: lf_input_val.csv | Shape: {lf_input_val.shape}")
+# lf_input_val = buys_val[["tx_id"] + [c for c in output_cols if c != "tx_id"]].copy()
+# lf_input_val.to_csv(f"{OUTPUT_DIR}/lf_input_val.csv", index=False)
+# print(f"✓ Saved: lf_input_val.csv | Shape: {lf_input_val.shape}")

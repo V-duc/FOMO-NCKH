@@ -192,50 +192,83 @@ for v in range(len(LFS) + 1):
 print("\n✓ Done. Next step: join fomo_prob vào feature table → train XGBoost.")
 
 
+# ── LF Interaction Matrix ─────────────────────────────────────────────────
+print("\n" + "=" * 60)
+print("LF INTERACTION MATRIX")
+print("=" * 60)
+
+lf_names = [lf.name for lf in LFS]
+n = len(LFS)
+
+# Header
+header = f"{'':30s}" + "".join(f"{name:>22s}" for name in lf_names)
+print(header)
+
+for i in range(n):
+    row_parts = [f"{lf_names[i]:<30s}"]
+    for j in range(n):
+        if i == j:
+            # Diagonal: coverage của chính LF đó
+            coverage = (L_train[:, i] != ABSTAIN).mean()
+            row_parts.append(f"{'COV='+f'{coverage:.1%}':>22s}")
+        else:
+            # Cả 2 đều không ABSTAIN
+            both_active = (L_train[:, i] != ABSTAIN) & (L_train[:, j] != ABSTAIN)
+            n_both = both_active.sum()
+            if n_both == 0:
+                row_parts.append(f"{'—':>22s}")
+                continue
+            # Trong số đó: agree vs conflict
+            agree    = (L_train[both_active, i] == L_train[both_active, j]).sum()
+            conflict = n_both - agree
+            row_parts.append(f"{'n='+f'{n_both:,}'+'  c='+f'{conflict/n_both:.0%}':>22s}")
+    print("".join(row_parts))
+
+print("\n  Đọc: n = số tx cả 2 LF cùng active | c = % conflict trong số đó")
+print("  Diagonal: coverage của LF đó")
 
 
 
 
+# # ── Validation set (Professional investors) ───────────────────────────────
+# import os
+# VAL_INPUT  = f"{OUTPUT_DIR}/lf_input_val.csv"
+# VAL_OUTPUT = f"{OUTPUT_DIR}/snorkel_labels_val.csv"
 
-# ── Validation set (Professional investors) ───────────────────────────────
-import os
-VAL_INPUT  = f"{OUTPUT_DIR}/lf_input_val.csv"
-VAL_OUTPUT = f"{OUTPUT_DIR}/snorkel_labels_val.csv"
-
-if os.path.exists(VAL_INPUT):
-    print("\n" + "=" * 60)
-    print("VALIDATION: Professional investors sanity check")
-    print("=" * 60)
+# if os.path.exists(VAL_INPUT):
+#     print("\n" + "=" * 60)
+#     print("VALIDATION: Professional investors sanity check")
+#     print("=" * 60)
     
-    df_val  = pd.read_csv(VAL_INPUT, parse_dates=["timestamp"])
-    L_val   = applier.apply(df_val)
-    proba_val = label_model.predict_proba(L=L_val)
-    fomo_prob_val = proba_val[:, 1]
+#     df_val  = pd.read_csv(VAL_INPUT, parse_dates=["timestamp"])
+#     L_val   = applier.apply(df_val)
+#     proba_val = label_model.predict_proba(L=L_val)
+#     fomo_prob_val = proba_val[:, 1]
 
-    print(f"  Total Professional BUY: {len(df_val):,}")
-    print(f"  fomo_prob mean  : {fomo_prob_val.mean():.4f}  (train: {fomo_prob.mean():.4f})")
-    print(f"  fomo_prob median: {np.median(fomo_prob_val):.4f}  (train: {np.median(fomo_prob):.4f})")
-    print(f"  % prob > 0.5    : {(fomo_prob_val > 0.5).mean()*100:.1f}%  (train: {(fomo_prob > 0.5).mean()*100:.1f}%)")
+#     print(f"  Total Professional BUY: {len(df_val):,}")
+#     print(f"  fomo_prob mean  : {fomo_prob_val.mean():.4f}  (train: {fomo_prob.mean():.4f})")
+#     print(f"  fomo_prob median: {np.median(fomo_prob_val):.4f}  (train: {np.median(fomo_prob):.4f})")
+#     print(f"  % prob > 0.5    : {(fomo_prob_val > 0.5).mean()*100:.1f}%  (train: {(fomo_prob > 0.5).mean()*100:.1f}%)")
 
-    print("\n  LF coverage — Professional vs Train:")
-    for i, lf in enumerate(LFS):
-        val_fomo  = (L_val[:, i] == FOMO).mean() * 100
-        train_fomo = (L_train[:, i] == FOMO).mean() * 100
-        print(f"  {lf.name:<30} val: {val_fomo:.1f}%  train: {train_fomo:.1f}%")
+#     print("\n  LF coverage — Professional vs Train:")
+#     for i, lf in enumerate(LFS):
+#         val_fomo  = (L_val[:, i] == FOMO).mean() * 100
+#         train_fomo = (L_train[:, i] == FOMO).mean() * 100
+#         print(f"  {lf.name:<30} val: {val_fomo:.1f}%  train: {train_fomo:.1f}%")
 
-    print("\n  → Kỳ vọng: Professional fomo_prob thấp hơn train rõ rệt")
-    print("  → Nếu không → review lại LF threshold")
+#     print("\n  → Kỳ vọng: Professional fomo_prob thấp hơn train rõ rệt")
+#     print("  → Nếu không → review lại LF threshold")
 
-    # Save
-    out_val = pd.DataFrame({
-        "tx_id"      : df_val["tx_id"].values,
-        "investor_id": df_val["investor_id"].values,
-        "timestamp"  : df_val["timestamp"].values,
-        "fomo_prob"  : fomo_prob_val,
-        "lf_votes"   : (L_val == FOMO).sum(axis=1),
-        "all_abstain": (L_val == ABSTAIN).all(axis=1),
-    })
-    out_val.to_csv(VAL_OUTPUT, index=False)
-    print(f"\n  ✓ Saved: {VAL_OUTPUT}")
+#     # Save
+#     out_val = pd.DataFrame({
+#         "tx_id"      : df_val["tx_id"].values,
+#         "investor_id": df_val["investor_id"].values,
+#         "timestamp"  : df_val["timestamp"].values,
+#         "fomo_prob"  : fomo_prob_val,
+#         "lf_votes"   : (L_val == FOMO).sum(axis=1),
+#         "all_abstain": (L_val == ABSTAIN).all(axis=1),
+#     })
+#     out_val.to_csv(VAL_OUTPUT, index=False)
+#     print(f"\n  ✓ Saved: {VAL_OUTPUT}")
     
-    print(label_model.get_weights())
+#     print(label_model.get_weights())
