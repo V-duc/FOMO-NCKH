@@ -100,7 +100,7 @@ def LF_return_momentum(x):
         return ABSTAIN
     if x.return_5d > RETURN_5D_THRESHOLD:
         return FOMO
-    if x.return_5d < -0.0608:
+    if x.return_5d < -0.0581:
         return NORMAL
     return ABSTAIN
 

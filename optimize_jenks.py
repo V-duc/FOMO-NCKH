@@ -11,7 +11,7 @@ INPUT_FILE = Path("data/output/cluster_market_context.csv")
 # while maintaining light clipping on the upper end (3%) to preserve FOMO signals.
 ASYMMETRIC_CONFIG = {
     "raw_return_1d": (0.05, 0.03),
-    "raw_cumulative_return_5d": (0.04, 0.03),
+    "raw_cumulative_return_5d": (0.05, 0.05),
     "raw_price_above_ma20": (0.05, 0.03), # Price can be lightly clipped at both ends
     "raw_rsi_14": (0.05, 0.00),           # RSI does not require upper bound clipping
     "raw_volatility_5d": (0.05, 0.05)     # Volatility should be balanced

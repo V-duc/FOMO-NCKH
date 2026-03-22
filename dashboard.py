@@ -1,387 +1,645 @@
-import model_builder
+"""
+dashboard.py — FOMO Investor Detection Dashboard
+
+Data source: snorkel_labels.csv + fomo_features.csv + enriched_trades_train.csv
+Threshold:   > 0.71 = High | 0.2-0.71 = Medium | < 0.2 = Low
+Không dùng XGBoost model — chỉ visualize Snorkel output.
+
+Chạy:
+    streamlit run dashboard.py
+"""
+
 import os
+import warnings
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
 import streamlit as st
-from utils import fomo_level
-from constants import (
-  FOMO_TEST_FILE,
-  FEATURE_COLS,
-  MODEL_DIR,
-  FOMOScoreThresholds as th_fomo_score
+from datetime import timedelta, date
+
+warnings.filterwarnings("ignore")
+
+from constants import OUTPUT_DIR
+
+SNORKEL_FILE  = f"{OUTPUT_DIR}/snorkel_labels.csv"
+FEATURES_FILE = f"{OUTPUT_DIR}/fomo_features.csv"
+ENRICHED_FILE = f"{OUTPUT_DIR}/enriched_trades_train.csv"
+
+# ── Snorkel-based thresholds ──────────────────────────────────────────────
+FOMO_HIGH_THRESH = 0.71
+FOMO_LOW_THRESH  = 0.20
+
+DURATION_OPTIONS = {
+    "5 ngày"  : 5,
+    "10 ngày" : 10,
+    "30 ngày" : 30,
+    "60 ngày" : 60,
+    "90 ngày" : 90,
+    "180 ngày": 180,
+    "360 ngày": 360,
+    "Tất cả"  : None,
+}
+
+# ── Page config ───────────────────────────────────────────────────────────
+st.set_page_config(
+    page_title="FOMO Investor Dashboard",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
+st.markdown("""
+<style>
+    /* Chỉ override những thứ cần thiết — để Streamlit dark theme tự xử lý phần còn lại */
+    [data-testid="stMetricValue"] { font-size: 1.4rem; }
+    .block-container { padding-top: 1rem; }
+
+    /* Buttons */
+    [data-testid="stButton"] button {
+        background-color: #e74c3c;
+        color: white;
+        border-radius: 6px;
+        border: none;
+    }
+    [data-testid="stButton"] button:hover {
+        background-color: #c0392b;
+    }
+</style>
+""", unsafe_allow_html=True)
 
 
-# Page config
-st.set_page_config(page_title="FOMO Investor Dashboard", layout="wide")
+# ── Helpers ───────────────────────────────────────────────────────────────
+def assign_fomo_level(score):
+    if score >= FOMO_HIGH_THRESH:  return "High"
+    elif score >= FOMO_LOW_THRESH: return "Medium"
+    else:                          return "Low"
 
-# Load model (cached)
-@st.cache_resource
-def load_model(model_path):
-    return model_builder.load_xgboost_model(model_path)
+def level_emoji(level):
+    return {"High": "🔴", "Medium": "🟡", "Low": "🟢"}.get(level, "⚪")
 
+def level_color(level):
+    return {"High": "#e74c3c", "Medium": "#f39c12", "Low": "#27ae60"}.get(level, "gray")
+
+
+# ── Load data ─────────────────────────────────────────────────────────────
 @st.cache_data
-def load_test_data():
-    return pd.read_csv(FOMO_TEST_FILE)
+def load_all():
+    snorkel  = pd.read_csv(SNORKEL_FILE,  parse_dates=["timestamp"])
+    features = pd.read_csv(FEATURES_FILE, parse_dates=["timestamp"])
+    enriched = pd.read_csv(ENRICHED_FILE, parse_dates=["timestamp"])
 
-@st.cache_data
-def get_model_files():
-    """Get list of all model files (cached)."""
-    model_files = []
-    if os.path.exists(MODEL_DIR):
-        model_files = [f for f in os.listdir(MODEL_DIR) if f.endswith(('.json', '.pkl'))]
-    return model_files
+    # Classify từ fomo_prob Snorkel
+    snorkel["fomo_level"] = snorkel["fomo_prob"].apply(assign_fomo_level)
 
-@st.cache_data
-def detect_fomo_behavior(_model, test_data):
-    """Detect FOMO behavior in all trading windows (cached per model)."""
-    # Ensure feature columns are numeric
-    result = test_data.copy()
-    for col in FEATURE_COLS:
-        result[col] = pd.to_numeric(result[col], errors='coerce')
-    
-    X_test = result[FEATURE_COLS]
-    fomo_probabilities = _model.predict_proba(X_test)[:, 1]
-    result['fomo_score'] = fomo_probabilities
-    return result
+    # Merge snorkel + features theo tx_id
+    df = snorkel[["tx_id", "investor_id", "timestamp",
+                  "fomo_prob", "fomo_level",
+                  "lf_votes", "all_abstain"]].copy()
 
-@st.cache_data
-def create_investor_table(test_data_with_scores):
-    """Create investor summary table with FOMO levels (cached)."""
-    # Create a lookup dictionary for fast access
-    investor_data = []
-    seen_investors = set()
+    # Merge market context từ enriched (BUY only)
+    enriched_buy = enriched[enriched["side"] == "BUY"].copy()
+    market_cols  = ["tx_id", "asset_id", "totalValue",
+                    "rsi_14", "return_1d", "return_5d",
+                    "volatility_5d", "volatility_10d",
+                    "price_above_ma20", "market_price", "ma_20d"]
+    market_cols  = [c for c in market_cols if c in enriched_buy.columns]
+    df = df.merge(enriched_buy[market_cols], on="tx_id", how="left")
 
-    for idx, row in test_data_with_scores.iterrows():
-        inv_id = row['investor_id']
-        if inv_id not in seen_investors:
-            score = row['fomo_score']
-            level = fomo_level(score)
-            level_emoji = {"Low": "🟢", "Medium": "🟡", "High": "🔴"}.get(level, "⚪")
-            
-            investor_data.append({
-                'Investor ID': inv_id,
-                'FOMO': f"{level_emoji} {level}",
-                'FOMO Score': score,
-                'Level': level  # For sorting
-            })
-            seen_investors.add(inv_id)
-    
-    # Create DataFrame and sort by score (highest first)
-    df = pd.DataFrame(investor_data)
-    df = df.sort_values('FOMO Score', ascending=False).reset_index(drop=True)
-    
+    # Merge behavioral features từ fomo_features
+    feat_cols = [c for c in features.columns
+                 if c not in ["tx_id", "investor_id", "timestamp",
+                               "fomo_prob", "momentum_acceleration"]]
+    df = df.merge(features[["tx_id"] + feat_cols], on="tx_id", how="left")
+
     return df
 
-# Main app
-st.title("📊 FOMO Investor Detection Dashboard")
+full_df = load_all()
 
-# Sidebar
-st.sidebar.header("Settings")
+# Reference groups Q1/Q4
+@st.cache_data
+def build_reference_groups(df):
+    radar_feats = [f for f in [
+        "rsi_14", "volatility_10d", "capital_acceleration_ratio",
+        "investor_alignment_with_crowd", "consecutive_buy_streak",
+        "rolling_buy_ratio_last_5"
+    ] if f in df.columns and df[f].notna().sum() > 0]
 
-# Get list of all model files (cached - runs once)
-model_files = get_model_files()
-if not model_files:
-    st.error(f"No model files found in {MODEL_DIR}")
+    q1 = df[df["fomo_level"] == "Low"][radar_feats].median()
+    q4 = df[df["fomo_level"] == "High"][radar_feats].median()
+    return q1, q4, radar_feats
+
+q1_ref, q4_ref, radar_feats = build_reference_groups(full_df)
+
+# Investor summary
+@st.cache_data
+def build_investor_summary(df):
+    s = df.groupby("investor_id").agg(
+        n_tx      = ("tx_id",      "count"),
+        avg_prob  = ("fomo_prob",  "mean"),
+        max_prob  = ("fomo_prob",  "max"),
+        n_high    = ("fomo_level", lambda x: (x=="High").sum()),
+        n_medium  = ("fomo_level", lambda x: (x=="Medium").sum()),
+        n_low     = ("fomo_level", lambda x: (x=="Low").sum()),
+        first_tx  = ("timestamp",  "min"),
+        last_tx   = ("timestamp",  "max"),
+    ).reset_index()
+    s["fomo_level"] = s["avg_prob"].apply(assign_fomo_level)
+    s["high_ratio"] = s["n_high"] / s["n_tx"]
+    return s.sort_values("avg_prob", ascending=False).reset_index(drop=True)
+
+investor_summary = build_investor_summary(full_df)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# SIDEBAR
+# ════════════════════════════════════════════════════════════════════════════
+st.sidebar.title("🔍 Bộ lọc")
+
+# ── Init session state ────────────────────────────────────────────────────
+if "cur_idx" not in st.session_state:
+    st.session_state.cur_idx = 0
+if "selected_id" not in st.session_state:
+    st.session_state.selected_id = ""
+
+# ── 1. Search investor ────────────────────────────────────────────────────
+st.sidebar.subheader("👤 Chọn Investor")
+
+search_id = st.sidebar.text_input(
+    "Tìm Investor ID:", placeholder="Nhập ID...",
+    key="search_input"
+)
+
+level_filter = st.sidebar.multiselect(
+    "Lọc theo FOMO Level:",
+    options=["High", "Medium", "Low"],
+    default=[],
+    key="level_filter"
+)
+
+filtered_inv = investor_summary.copy()
+if level_filter:
+    filtered_inv = filtered_inv[
+        filtered_inv["fomo_level"].isin(level_filter)
+    ]
+
+avail_ids = filtered_inv["investor_id"].tolist()
+if not avail_ids:
+    avail_ids = investor_summary["investor_id"].tolist()
+
+# Nếu user nhập ID hợp lệ → cập nhật cur_idx
+if search_id and search_id in avail_ids:
+    st.session_state.cur_idx = avail_ids.index(search_id)
+
+# Đảm bảo cur_idx trong bounds
+st.session_state.cur_idx = max(0, min(
+    st.session_state.cur_idx, len(avail_ids) - 1
+))
+
+# Navigation buttons
+c_p, c_n = st.sidebar.columns(2)
+with c_p:
+    if st.button("⬅️ Prev", key="btn_prev"):
+        st.session_state.cur_idx = max(0, st.session_state.cur_idx - 1)
+        st.rerun()
+with c_n:
+    if st.button("Next ➡️", key="btn_next"):
+        st.session_state.cur_idx = min(
+            len(avail_ids) - 1, st.session_state.cur_idx + 1
+        )
+        st.rerun()
+
+selected_id = avail_ids[st.session_state.cur_idx]
+st.session_state.selected_id = selected_id
+
+st.sidebar.markdown("---")
+
+# ── 2. Time filter ────────────────────────────────────────────────────────
+st.sidebar.subheader("⏱️ Khoảng thời gian")
+
+inv_all  = full_df[full_df["investor_id"] == selected_id].copy()
+min_date = inv_all["timestamp"].min().date() if len(inv_all) > 0 else date(2020, 11, 1)
+max_date = inv_all["timestamp"].max().date() if len(inv_all) > 0 else date(2022, 7, 31)
+
+# Reset start_date khi đổi investor
+date_key     = f"sd_{selected_id}"
+duration_key = f"dur_{selected_id}"
+
+start_date = st.sidebar.date_input(
+    "Start date:",
+    value=min_date,
+    min_value=min_date,
+    max_value=max_date,
+    key=date_key,
+)
+duration_label = st.sidebar.selectbox(
+    "Khoảng thời gian:",
+    options=list(DURATION_OPTIONS.keys()),
+    index=list(DURATION_OPTIONS.keys()).index("Tất cả"),
+    key=duration_key,
+)
+duration_days = DURATION_OPTIONS[duration_label]
+end_date = (start_date + timedelta(days=duration_days)
+            if duration_days else max_date)
+
+st.sidebar.markdown("---")
+
+# ── 3. Investor list (thu nhỏ xuống dưới) ────────────────────────────────
+st.sidebar.markdown(f"**{len(filtered_inv):,} investors**")
+disp = filtered_inv[["investor_id", "fomo_level", "avg_prob"]].copy()
+disp["Level"] = disp["fomo_level"].apply(lambda x: f"{level_emoji(x)} {x}")
+disp["Score"] = disp["avg_prob"].round(4)
+disp = disp[["investor_id", "Level", "Score"]]
+disp.index = range(1, len(disp) + 1)
+st.sidebar.dataframe(disp, height=200, use_container_width=True)
+
+inv_data = inv_all[
+    (inv_all["timestamp"].dt.date >= start_date) &
+    (inv_all["timestamp"].dt.date <= end_date)
+].copy()
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# MAIN
+# ════════════════════════════════════════════════════════════════════════════
+st.title("📊 FOMO Investor Dashboard")
+st.markdown(
+    f"**Investor:** `{selected_id}` | "
+    f"**Period:** {start_date} → {end_date} | "
+    f"**{len(inv_data):,} lệnh**"
+)
+st.markdown("---")
+
+if len(inv_data) == 0:
+    st.warning("Không có lệnh nào trong khoảng thời gian này.")
     st.stop()
 
-# Sort model files (newest first)
-sorted_model_files = sorted(model_files, reverse=True)
+inv_sorted  = inv_data.sort_values("timestamp")
+avg_prob    = inv_data["fomo_prob"].mean()
+max_prob    = inv_data["fomo_prob"].max()
+level_      = assign_fomo_level(avg_prob)
+certainty   = abs(avg_prob - 0.5) * 2
+n_tx        = len(inv_data)
+high_ratio  = (inv_data["fomo_level"] == "High").mean()
+n_high      = (inv_data["fomo_level"] == "High").sum()
+n_medium    = (inv_data["fomo_level"] == "Medium").sum()
+n_low       = (inv_data["fomo_level"] == "Low").sum()
 
-# Model selector - show all files in selectbox
-selected_model_file = st.sidebar.selectbox("Classifier Model", sorted_model_files)
+# ── Metrics ───────────────────────────────────────────────────────────────
+c1, c2, c3, c4, c5 = st.columns(5)
+c1.metric("FOMO Score (avg)", f"{avg_prob:.4f}",
+          f"{avg_prob - full_df['fomo_prob'].mean():.4f} vs market")
+c2.metric("FOMO Level", f"{level_emoji(level_)} {level_}")
+c3.metric("LF Votes (avg)",
+          f"{inv_data['lf_votes'].mean():.1f}" if "lf_votes" in inv_data.columns else "N/A")
+c4.metric("Số lệnh", f"{n_tx:,}")
+c5.metric("% High FOMO", f"{high_ratio:.1%}",
+          f"{high_ratio - (full_df['fomo_level']=='High').mean():.1%} vs market")
+st.markdown("---")
 
-# Load the selected model (cached per model file)
-model = load_model(f"{MODEL_DIR}/{selected_model_file}")
 
-# Load test data (cached - runs once)
-test_data = load_test_data()
+# ════════════════════════════════════════════════════════════════════════════
+# ROW 1 — Gauge + Radar
+# ════════════════════════════════════════════════════════════════════════════
+col_g, col_r = st.columns([1, 2])
 
-# Detect FOMO behavior in all windows (cached per model - runs once per model)
-test_data_with_scores = detect_fomo_behavior(model, test_data)
-
-# Create investor table (cached - runs once per model)
-investor_table = create_investor_table(test_data_with_scores)
-
-# Sidebar - Investor Selection
-st.sidebar.subheader("Select Investor")
-
-# Filter by FOMO Level
-fomo_level_filter = st.sidebar.multiselect(
-    "Filter by FOMO Level",
-    options=["Low", "Medium", "High"],
-    default=[],
-    help=f"Filter by FOMO level: "
-        + f"🟢 Low (<{th_fomo_score.LOW_FOMO*100:.1f}%), "
-        + f"🟡 Medium ({th_fomo_score.LOW_FOMO*100:.1f}-{th_fomo_score.MEDIUM_FOMO*100:.1f}%), "
-        + f"🔴 High (>{th_fomo_score.MEDIUM_FOMO*100:.1f}%). "
-        + f"FOMO level shown in the table is from first trading window encountered per investor"
-)
-
-# Filter table based on FOMO level
-if fomo_level_filter:
-    filtered_table = investor_table[investor_table['Level'].isin(fomo_level_filter)].reset_index(drop=True)
-else:
-    filtered_table = investor_table.copy()
-
-# Add 1-based index for display
-display_table = filtered_table[['Investor ID', 'FOMO']].copy()
-display_table.index = display_table.index + 1
-
-# Display the scrollable table (read-only for viewing)
-st.sidebar.dataframe(
-    display_table,
-    height=500,
-    width='stretch',
-    hide_index=False
-)
-
-# Selection with navigation
-available_ids = filtered_table['Investor ID'].tolist()
-
-# Track filter changes to reset selection
-if 'previous_filter' not in st.session_state:
-    st.session_state.previous_filter = fomo_level_filter
-    
-if st.session_state.previous_filter != fomo_level_filter:
-    st.session_state.previous_filter = fomo_level_filter
-    st.session_state.current_investor_index = 0  # Reset to first investor
-
-# Initialize session state for current index
-if 'current_investor_index' not in st.session_state:
-    st.session_state.current_investor_index = 0
-
-# Ensure index is within bounds
-st.session_state.current_investor_index = max(0, min(st.session_state.current_investor_index, len(available_ids) - 1))
-
-# Get current investor ID based on index
-current_investor_id = str(available_ids[st.session_state.current_investor_index]) if available_ids else ""
-
-# Text input with current investor ID (use both filter and index in key to handle both scenarios)
-# Display row number starting from 1
-filter_hash = str(sorted(fomo_level_filter))  # Create a hash of the filter to detect changes
-selected_investor_id = st.sidebar.text_input(
-    f"Investor ID (Row {st.session_state.current_investor_index + 1} of {len(available_ids)})",
-    value=current_investor_id,
-    placeholder="Type or paste Investor ID here...",
-    key=f"investor_id_input_{filter_hash}_{st.session_state.current_investor_index}"
-)
-
-# Navigation buttons below text box (thinner)
-col1, col2 = st.sidebar.columns(2)
-
-with col1:
-    if st.button("⬅️ Previous", width='stretch', key="prev_btn"):
-        st.session_state.current_investor_index = max(0, st.session_state.current_investor_index - 1)
-        st.rerun()
-
-with col2:
-    if st.button("Next ➡️", width='stretch', key="next_btn"):
-        st.session_state.current_investor_index = min(len(available_ids) - 1, st.session_state.current_investor_index + 1)
-        st.rerun()
-
-# Update index if user manually enters an ID
-if selected_investor_id in available_ids:
-    st.session_state.current_investor_index = available_ids.index(selected_investor_id)
-    investor_id = selected_investor_id
-else:
-    if selected_investor_id:  # Only show warning if user entered something
-        st.sidebar.warning(f"Investor ID '{selected_investor_id}' not found. Showing row {st.session_state.current_investor_index}.")
-    investor_id = available_ids[st.session_state.current_investor_index] if available_ids else None
-
-# === INDIVIDUAL INVESTOR ANALYSIS ===
-st.header(f"🔍 Investor #{investor_id} - FOMO Behavior Analysis")
-
-# Get ALL data for this investor (multiple trading windows)
-investor_all_data = test_data_with_scores[test_data_with_scores['investor_id'] == investor_id]
-
-# Show how many windows were analyzed for this investor
-st.write(f"📊 **{len(investor_all_data)} trading window(s)** analyzed for this investor")
-
-# If multiple windows, let user select which one to examine in detail
-if len(investor_all_data) > 1:
-    # Check if window_start exists
-    has_dates = 'window_start' in investor_all_data.columns
-    
-    window_index = st.selectbox(
-        "Select trading window to analyze:",
-        range(len(investor_all_data)),
-        format_func=lambda x: (
-            f"Window #{x+1} - {investor_all_data.iloc[x]['window_start']} (FOMO Score: {investor_all_data.iloc[x]['fomo_score']:.4f})"
-            if has_dates else
-            f"Window #{x+1} (FOMO Score: {investor_all_data.iloc[x]['fomo_score']:.4f})"
-        )
-    )
-    investor_data = investor_all_data.iloc[window_index]
-    
-    # Show summary table of all windows
-    with st.expander("📋 View FOMO detection across all trading windows"):
-        summary_cols = (['window_start'] if has_dates else []) + ['fomo_score'] + FEATURE_COLS
-        windows_summary = investor_all_data[summary_cols].copy()
-        windows_summary.insert(0, 'Window #', range(1, len(investor_all_data) + 1))
-        windows_summary['FOMO Level'] = windows_summary['fomo_score'].apply(fomo_level)
-        st.dataframe(windows_summary, width='stretch', hide_index=True)
-else:
-    investor_data = investor_all_data.iloc[0]
-
-investor_score = investor_data['fomo_score']
-investor_fomo_level = fomo_level(investor_score)
-
-# Calculate key behavioral signals (top 3 features with highest absolute Impact Scores)
-X_investor = investor_data[FEATURE_COLS].to_frame().T
-# Ensure numeric dtypes for XGBoost
-for col in FEATURE_COLS:
-    X_investor[col] = pd.to_numeric(X_investor[col], errors='coerce')
-shap_values = model_builder.get_shap_values(model, X_investor)
-
-shap_df = pd.DataFrame({
-    'Feature': FEATURE_COLS,
-    'Impact Score': shap_values[0],
-    'Feature Value': X_investor.iloc[0].values
-})
-shap_df = shap_df.sort_values('Impact Score', key=abs, ascending=False)
-key_signals = shap_df.head(3)
-
-# Display key metrics in cards
-col1, col2, col3 = st.columns(3)
-
-with col1:
-    st.metric(
-        label="FOMO Score",
-        value=f"{investor_score:.4f}",
-        delta=f"{(investor_score - test_data_with_scores['fomo_score'].mean()):.4f} vs average",
-        help="FOMO detection score (0=no FOMO, 1=strong FOMO). "
-            + "Delta (shown below the score) shows how much this score differs from the average across all windows. "
-            + "Positive delta = above average FOMO detected."
-    )
-
-with col2:
-    level_color = {"Low": "🟢", "Medium": "🟡", "High": "🔴"}
-    st.metric(
-        label="FOMO Level",
-        value=f"{level_color.get(investor_fomo_level, '⚪')} {investor_fomo_level}"
-    )
-
-with col3:
-    model_certainty = abs(investor_score - 0.5) * 2
-    st.metric(
-        label="Model Certainty",
-        value=f"{model_certainty:.2%}",
-        help="How confident the model is in its classification (close to 0.5 = uncertain, far from 0.5 = certain)"
-    )
-
-# Key Behavioral Signals
-st.subheader("🎯 Key Behavioral Signals Detected")
-st.write("Top 3 features indicating FOMO behavior in this window:")
-
-signal_col1, signal_col2, signal_col3 = st.columns(3)
-
-for idx, (col, row) in enumerate(zip([signal_col1, signal_col2, signal_col3], key_signals.itertuples())):
-    with col:
-        impact = "⬆️ Increases FOMO" if row._2 > 0 else "⬇️ Decreases FOMO"
-        value_display = "None" if pd.isna(row._3) else f"{row._3:.4f}"
-        st.markdown(f"""
-        **#{idx+1}: {row.Feature}**
-        - Value: `{value_display}`
-        - Impact: {impact}
-        - Impact Score: `{row._2:.4f}`
-        """)
-
-# FOMO Gauge
-st.subheader("📊 FOMO Detection Score")
-col1, col2 = st.columns([1, 2])
-
-with col1:
-    # Gauge chart
-    fig = go.Figure(go.Indicator(
-        mode = "gauge+number",
-        value = investor_score,
-        domain = {'x': [0, 1], 'y': [0, 1]},
-        title = {'text': "FOMO Score"},
-        gauge = {
-            'axis': {'range': [None, 1]},
-            'bar': {'color': "darkred"},
-            'steps': [
-                {'range': [0, th_fomo_score.LOW_FOMO], 'color': "lightgreen"},
-                {'range': [th_fomo_score.LOW_FOMO, th_fomo_score.MEDIUM_FOMO], 'color': "yellow"},
-                {'range': [th_fomo_score.MEDIUM_FOMO, 1], 'color': "salmon"}
+with col_g:
+    st.subheader("🎯 FOMO Score")
+    fig_g = go.Figure(go.Indicator(
+        mode="gauge+number",
+        value=avg_prob,
+        title={"text": f"Avg Snorkel Prob<br>"
+                       f"<span style='font-size:0.8em'>Max: {max_prob:.4f}</span>"},
+        gauge={
+            "axis" : {"range": [0, 1]},
+            "bar"  : {"color": level_color(level_)},
+            "steps": [
+                {"range": [0,               FOMO_LOW_THRESH],  "color": "#d5f5e3"},
+                {"range": [FOMO_LOW_THRESH, FOMO_HIGH_THRESH], "color": "#fef9e7"},
+                {"range": [FOMO_HIGH_THRESH, 1],               "color": "#fadbd8"},
             ],
-            # 'threshold': {
-            #     'line': {'color': "red", 'width': 4},
-            #     'thickness': 0.75,
-            #     'value': 0.05
-            # }
+            "threshold": {
+                "line" : {"color": "black", "width": 3},
+                "value": FOMO_HIGH_THRESH
+            }
         }
     ))
-    fig.update_layout(height=400)
-    st.plotly_chart(fig, width='stretch')
+    fig_g.update_layout(height=300, paper_bgcolor="#0e1117", plot_bgcolor="#0e1117")
+    st.plotly_chart(fig_g, use_container_width=True)
 
-with col2:
-    # Feature values comparison
-    st.write("**Behavioral Features vs Average**")
-    
-    features_df = pd.DataFrame({
-        'Feature': FEATURE_COLS,
-        'This Window': [investor_data[col] for col in FEATURE_COLS],
-        'Average': [test_data_with_scores[col].mean() for col in FEATURE_COLS]
-    })
-    
-    fig = go.Figure()
-    fig.add_trace(go.Bar(name='This Window', x=features_df['Feature'], y=features_df['This Window'], width=0.3))
-    fig.add_trace(go.Bar(name='Average', x=features_df['Feature'], y=features_df['Average'], width=0.3))
-    fig.update_layout(barmode='group', height=400)
-    st.plotly_chart(fig, width='stretch')
+with col_r:
+    st.subheader("🧬 Behavioral DNA")
+    st.caption("So sánh vs Q1 Rational và Q4 High FOMO (market-wide)")
 
-# SHAP explanation
-st.subheader("🔬 Model Explanation")
+    inv_radar = inv_data[radar_feats].median()
 
-fig = px.bar(shap_df, x='Impact Score', y='Feature', orientation='h',
-             title="How Each Feature Contributed to FOMO Detection",
-             color='Impact Score',
-             color_continuous_scale=['blue', 'red'],
-             hover_data=['Feature Value'])
-st.plotly_chart(fig, width='stretch')
+    # Normalize theo range thật — RSI cố định 0-100
+    FIXED_RANGES = {
+        "rsi_14"                       : (0, 100),
+        "rolling_buy_ratio_last_5"     : (0, 1),
+        "investor_alignment_with_crowd": (0, 1),
+        "consecutive_buy_streak"       : (0, 20),
+        "capital_acceleration_ratio"   : (0, 5),
+    }
+    if "volatility_10d" in full_df.columns:
+        FIXED_RANGES["volatility_10d"] = (0, full_df["volatility_10d"].quantile(0.99))
 
-# Summary box
-model_certainty = abs(investor_score - 0.5) * 2
-window_info = f" in window starting {investor_data.get('window_start', 'N/A')}" if 'window_start' in investor_data else ""
+    def norm(s):
+        result = []
+        for feat in radar_feats:
+            val = float(s[feat]) if feat in s.index else 0
+            if feat in FIXED_RANGES:
+                lo_f, hi_f = FIXED_RANGES[feat]
+            else:
+                lo_f = float(full_df[feat].quantile(0.01))
+                hi_f = float(full_df[feat].quantile(0.99))
+            result.append(float(np.clip((val - lo_f) / (hi_f - lo_f + 1e-8), 0, 1)))
+        return result
 
-# Build behavioral evidence with human-readable descriptions
-behavioral_evidence = []
-for col in FEATURE_COLS:
-    value = investor_data[col]
-    if pd.isna(value):
-        behavioral_evidence.append(f"  - **{col}**: None")
-    elif col == 'n_buys':
-        behavioral_evidence.append(f"  - **{col}**: {int(value)} buys made")
-    elif col == 'avg_return_before_buy':
-        behavioral_evidence.append(f"  - **{col}**: {value:.4f} (bought after {value*100:.2f}% price change)")
-    elif col == 'buy_after_spike_ratio':
-        behavioral_evidence.append(f"  - **{col}**: {value:.4f} ({value*100:.1f}% of buys were after spikes)")
-    elif col == 'avg_missed_return':
-        behavioral_evidence.append(f"  - **{col}**: {value:.4f} (missed {value*100:.2f}% returns on non-trading days)")
-    elif col == 'n_trades':
-        behavioral_evidence.append(f"  - **{col}**: {int(value)} total trades")
+    cats  = radar_feats + [radar_feats[0]]
+    inv_n_raw = norm(inv_radar)
+    q1_n_raw  = norm(q1_ref)
+    q4_n_raw  = norm(q4_ref)
+    inv_n = inv_n_raw + [inv_n_raw[0]]
+    q1_n  = q1_n_raw  + [q1_n_raw[0]]
+    q4_n  = q4_n_raw  + [q4_n_raw[0]]
+
+    fig_r = go.Figure()
+    for vals, name, color, opacity, fillcolor in [
+        (inv_n, f"Investor {selected_id}", "#e74c3c", 0.85, "rgba(231,76,60,0.45)"),
+        (q4_n,  "Q4 High FOMO",           "#f39c12", 0.85, "rgba(243,156,18,0.35)"),
+        (q1_n,  "Q1 Rational",            "#27ae60", 0.85, "rgba(39,174,96,0.35)"),
+    ]:
+        fig_r.add_trace(go.Scatterpolar(
+            r=vals, theta=cats, name=name,
+            line=dict(color=color, width=3),
+            fill="toself", opacity=opacity,
+            fillcolor=fillcolor,
+        ))
+    fig_r.update_layout(paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+        polar=dict(
+            radialaxis=dict(visible=True, range=[0, 1],
+                            gridcolor="#333", tickfont=dict(color="#aaa")),
+            angularaxis=dict(gridcolor="#333", tickfont=dict(color="#fff")),
+            bgcolor="#0e1117",
+        ),
+        height=420,
+        showlegend=True,
+        legend=dict(orientation="h", yanchor="bottom", y=-0.2,
+                    font=dict(color="#fff"))
+    )
+    st.plotly_chart(fig_r, use_container_width=True)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# ROW 2 — Buy Proximity to Peak + Herding Scatter
+# ════════════════════════════════════════════════════════════════════════════
+col_pk, col_hd = st.columns(2)
+
+with col_pk:
+    st.subheader("📍 Buy Proximity to Peak")
+    st.caption("Vị trí giá mua so với MA20 — chứng minh 'mua đuổi'")
+
+    if "price_above_ma20" in inv_data.columns:
+        prox = inv_data["price_above_ma20"].dropna()
+        if len(prox) > 0:
+            fig_pk = go.Figure()
+
+            # Tạo bins thủ công để control màu per bin
+            bins    = np.arange(
+                float(prox.min()),
+                float(prox.max()) + 0.025, 0.025
+            )
+            counts, edges = np.histogram(prox, bins=bins)
+            bin_centers   = (edges[:-1] + edges[1:]) / 2
+            bar_colors    = [
+                "#e74c3c" if c > 1.05
+                else "#f39c12" if c > 1.0
+                else "#27ae60"
+                for c in bin_centers
+            ]
+
+            fig_pk.add_trace(go.Bar(
+                x=bin_centers,
+                y=counts,
+                marker_color=bar_colors,
+                width=0.022,
+                name="Buy proximity",
+            ))
+            fig_pk.add_vline(x=1.0,  line_dash="dash",
+                             line_color="black",
+                             annotation_text="MA20")
+            fig_pk.add_vline(x=1.05, line_dash="dot",
+                             line_color="#e74c3c",
+                             annotation_text="+5%")
+            pct_above = (prox > 1.0).mean() * 100
+            fig_pk.update_layout(paper_bgcolor="#0e1117", plot_bgcolor="#1a1a2e", 
+                height=300,
+                xaxis_title="Price / MA20",
+                yaxis_title="Số lệnh", showlegend=False,
+            )
+            st.caption(f"⚠️ {pct_above:.1f}% lệnh mua khi giá > MA20")
+            st.plotly_chart(fig_pk, use_container_width=True)
     else:
-        behavioral_evidence.append(f"  - **{col}**: {value:.4f}")
-behavioral_evidence_text = "  \n".join(behavioral_evidence)
+        st.info("Không có dữ liệu price_above_ma20.")
 
+with col_hd:
+    st.subheader("🐑 Herding Sensitivity")
+    st.caption("Giá trị lệnh vs mức độ đám đông — đo tính bầy đàn")
+
+    herd_cols = ["totalValue", "investor_alignment_with_crowd",
+                 "fomo_prob", "fomo_level", "timestamp"]
+    herd_cols = [c for c in herd_cols if c in inv_data.columns]
+    herd_df   = inv_data[herd_cols].dropna()
+
+    if len(herd_df) > 0 and "totalValue" in herd_df.columns:
+        fig_hd = px.scatter(
+            herd_df,
+            x="investor_alignment_with_crowd",
+            y="totalValue",
+            color="fomo_level",
+            color_discrete_map={
+                "High": "#e74c3c",
+                "Medium": "#f39c12",
+                "Low": "#27ae60"
+            },
+            size="fomo_prob", size_max=15,
+            hover_data=["timestamp", "fomo_prob"],
+            labels={
+                "investor_alignment_with_crowd":
+                    "Crowd Alignment (1=mua khi đám đông mua)",
+                "totalValue": "Giá trị lệnh (€)"
+            },
+        )
+        fig_hd.update_layout(height=300, paper_bgcolor="#0e1117", plot_bgcolor="#0e1117")
+        st.plotly_chart(fig_hd, use_container_width=True)
+    else:
+        st.info("Không đủ dữ liệu herding.")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# ROW 3 — Timeline FOMO Score
+# ════════════════════════════════════════════════════════════════════════════
+st.subheader("📈 Timeline FOMO Score")
+
+fig_tl = go.Figure()
+fig_tl.add_trace(go.Scatter(
+    x=inv_sorted["timestamp"],
+    y=inv_sorted["fomo_prob"],
+    mode="lines+markers",
+    name="Snorkel fomo_prob",
+    line=dict(color="#3498db", width=1.5),
+    marker=dict(
+        color=[level_color(l) for l in inv_sorted["fomo_level"]],
+        size=8, line=dict(width=1, color="white")
+    ),
+    hovertemplate="<b>%{x}</b><br>Score: %{y:.4f}<extra></extra>"
+))
+fig_tl.add_hline(y=FOMO_HIGH_THRESH, line_dash="dash",
+                 line_color="#e74c3c",
+                 annotation_text=f"High ({FOMO_HIGH_THRESH})",
+                 annotation_position="right")
+fig_tl.add_hline(y=FOMO_LOW_THRESH, line_dash="dash",
+                 line_color="#27ae60",
+                 annotation_text=f"Low ({FOMO_LOW_THRESH})",
+                 annotation_position="right")
+fig_tl.update_layout(paper_bgcolor="#0e1117", plot_bgcolor="#0e1117", 
+    height=300, yaxis=dict(range=[0, 1.05]),
+    xaxis_title="Thời gian",
+    yaxis_title="FOMO Prob (Snorkel)",
+    hovermode="x unified"
+)
+st.plotly_chart(fig_tl, use_container_width=True)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# ROW 4 — Feature Trajectory
+# ════════════════════════════════════════════════════════════════════════════
+st.subheader("📉 Feature Trajectory")
+st.caption("Quỹ đạo chỉ số kỹ thuật theo thời gian — 'Tại sao họ mua'")
+
+traj_feats = [f for f in [
+    "rsi_14", "volatility_10d", "consecutive_buy_streak",
+    "rolling_buy_ratio_last_5", "capital_acceleration_ratio",
+    "return_5d", "volatility_ratio"
+] if f in full_df.columns and f in inv_sorted.columns and inv_sorted[f].notna().sum() > 0]
+
+if not traj_feats:
+    st.warning("Không có feature trajectory nào có dữ liệu.")
+elif len(inv_sorted) == 1:
+    st.info("Investor này chỉ có 1 lệnh — không thể vẽ trajectory.")
+else:
+    sel_traj = st.multiselect(
+        "Chọn feature:", options=traj_feats,
+        default=traj_feats[:3],
+    )
+    if sel_traj:
+        fig_tr    = go.Figure()
+        colors_tr = ["#e74c3c", "#3498db", "#2ecc71", "#9b59b6", "#f39c12"]
+        has_data  = False
+
+        for i, feat in enumerate(sel_traj):
+            s = inv_sorted[feat].dropna()
+            if len(s) < 2:
+                st.caption(f"⚠️ {feat}: không đủ data (n={len(s)})")
+                continue
+
+            if s.max() == s.min():
+                norm_s = pd.Series([0.5] * len(s), index=s.index)
+                st.caption(f"ℹ️ {feat}: constant = {s.iloc[0]:.4f}")
+            else:
+                norm_s = (s - s.min()) / (s.max() - s.min())
+
+            fig_tr.add_trace(go.Scatter(
+                x=inv_sorted.loc[s.index, "timestamp"],
+                y=norm_s, mode="lines+markers", name=feat,
+                line=dict(color=colors_tr[i % len(colors_tr)], width=2),
+                customdata=s.values,
+                hovertemplate=f"<b>{feat}</b>: %{{customdata:.4f}}<extra></extra>",
+            ))
+            has_data = True
+
+        if has_data:
+            fig_tr.update_layout(
+                paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+                height=320,
+                yaxis_title="Normalized (0-1)",
+                xaxis_title="Thời gian",
+                hovermode="x unified",
+                legend=dict(orientation="h", yanchor="bottom", y=-0.3,
+                            font=dict(color="#fff")),
+                xaxis=dict(gridcolor="#333"),
+                yaxis=dict(gridcolor="#333"),
+            )
+            st.plotly_chart(fig_tr, use_container_width=True)
+        else:
+            st.warning("Không có feature nào đủ data để vẽ trajectory.")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# ROW 5 — Transaction table + Pie
+# ════════════════════════════════════════════════════════════════════════════
+col_tx, col_pie = st.columns([2, 1])
+
+with col_tx:
+    st.subheader("📋 Chi tiết lệnh")
+    show = ["timestamp", "fomo_prob", "fomo_level"]
+    if "lf_votes" in inv_sorted.columns:
+        show.append("lf_votes")
+    if "rsi_14" in inv_sorted.columns:
+        show.append("rsi_14")
+    if "return_5d" in inv_sorted.columns:
+        show.append("return_5d")
+
+    tx_disp = inv_sorted[show].copy()
+    tx_disp["fomo_level"] = tx_disp["fomo_level"].apply(
+        lambda x: f"{level_emoji(x)} {x}"
+    )
+    tx_disp["fomo_prob"] = tx_disp["fomo_prob"].round(4)
+    for col in ["rsi_14", "return_5d"]:
+        if col in tx_disp.columns:
+            tx_disp[col] = tx_disp[col].round(4)
+    tx_disp.index = range(1, len(tx_disp) + 1)
+    st.dataframe(tx_disp, use_container_width=True, height=350)
+
+with col_pie:
+    st.subheader("🥧 Phân bố Level")
+    level_c = inv_data["fomo_level"].value_counts().reindex(
+        ["High", "Medium", "Low"], fill_value=0
+    )
+    fig_pie = go.Figure(go.Pie(
+        labels=[f"{level_emoji(l)} {l}" for l in level_c.index],
+        values=level_c.values,
+        marker_colors=["#e74c3c", "#f39c12", "#27ae60"],
+        hole=0.4,
+        textinfo="label+percent+value",
+    ))
+    fig_pie.update_layout(height=350, showlegend=False, paper_bgcolor="#0e1117",
+                          margin=dict(t=10, b=10))
+    st.plotly_chart(fig_pie, use_container_width=True)
+
+
+# ── Summary ───────────────────────────────────────────────────────────────
+st.markdown("---")
 st.info(f"""
-**Detection Summary:**
-- **Investor ID:** {investor_id}{window_info}
-- **FOMO Detected:** {investor_fomo_level} level (score: {investor_score:.4f})
-- **Model Certainty:** {model_certainty:.2%}
-- **Primary Behavioral Signal:** {key_signals.iloc[0]['Feature']} (Impact Score: {key_signals.iloc[0]['Impact Score']:.4f})
-- **Rank:** #{(test_data_with_scores['fomo_score'] > investor_score).sum() + 1} out of {len(test_data_with_scores)} windows analyzed
+**📋 Tóm tắt — Investor `{selected_id}`**
+Period: **{start_date}** → **{end_date}** ({duration_label})
 
-**Behavioral Evidence:**  
-{behavioral_evidence_text}
+- **FOMO Level:** {level_emoji(level_)} **{level_}**  
+  avg = {avg_prob:.4f} | max = {max_prob:.4f}
+- **Phân bố:** 🔴 High: {n_high} | 🟡 Medium: {n_medium} | 🟢 Low: {n_low}
+- **% High FOMO:** {high_ratio:.1%} vs market {(full_df['fomo_level']=='High').mean():.1%}
+- **Threshold:** High > {FOMO_HIGH_THRESH} | Low < {FOMO_LOW_THRESH}
 """)
 
-# Top 10 FOMO trading windows
-st.subheader("🔥 Top 10 Windows with Highest FOMO Detected")
-top_fomo = test_data_with_scores.nlargest(10, 'fomo_score')[['investor_id', 'fomo_score'] + FEATURE_COLS]
-if 'window_start' in test_data_with_scores.columns:
-    top_fomo.insert(1, 'window_start', test_data_with_scores.nlargest(10, 'fomo_score')['window_start'].values)
-st.dataframe(top_fomo, width='stretch', hide_index=True)
+
+# ── Market overview ────────────────────────────────────────────────────────
+with st.expander("🌐 Top 10 FOMO Investors (toàn thị trường)"):
+    top10 = investor_summary.head(10).copy()
+    top10["Level"]  = top10["fomo_level"].apply(lambda x: f"{level_emoji(x)} {x}")
+    top10["Score"]  = top10["avg_prob"].round(4)
+    top10["High %"] = (top10["high_ratio"]*100).round(1).astype(str) + "%"
+    top10["N lệnh"] = top10["n_tx"]
+    top10.index = range(1, 11)
+    st.dataframe(
+        top10[["investor_id", "Level", "Score", "High %", "N lệnh"]],
+        use_container_width=True
+    )
